@@ -14,11 +14,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
 
       - name: Clone Poweramp SDK and Build Apple Music Immersed Skin APK
         run: |
@@ -28,15 +27,27 @@ jobs:
           export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           yes | sudo $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager --licenses >/dev/null 2>&1 || true
 
-          # 2. Clone official Poweramp API & Skin SDK repository into /tmp/pa
+          # 2. If poweramp_apple_music_skin_sdk.zip (or any .zip) was uploaded to the repo, extract it automatically
+          rm -rf /tmp/user_skin
+          mkdir -p /tmp/user_skin
+          if ls "$GITHUB_WORKSPACE"/*.zip >/dev/null 2>&1; then
+            for z in "$GITHUB_WORKSPACE"/*.zip; do
+              echo "[INFO] Extracting uploaded archive: $z"
+              unzip -q -o "$z" -d /tmp/user_skin
+            done
+          fi
+
+          # 3. Clone official Poweramp API & Skin SDK repository into /tmp/pa
           rm -rf /tmp/pa
           git clone --depth 1 https://github.com/maxmpz/powerampapi.git /tmp/pa
 
-          # 3. Auto-discover the sample skin res/ directory and patch resources
+          # 4. Merge Apple Music skin resources, fix XML references, and validate against SDK resources
           python3 - << 'EOF'
           import glob
           import os
+          import re
           import shutil
+          import zipfile
           import xml.etree.ElementTree as ET
 
           sample_root = "/tmp/pa/poweramp_skin_sample"
@@ -46,74 +57,196 @@ jobs:
 
           strings_path = strings_matches[0]
           res_dir = os.path.dirname(os.path.dirname(strings_path))
-          print(f"[INFO] Found strings.xml at: {strings_path}")
-          print(f"[INFO] Resolved res directory: {res_dir}")
+          print(f"[INFO] SDK sample strings.xml: {strings_path}")
+          print(f"[INFO] SDK sample res dir: {res_dir}")
 
-          # Copy any custom res/ overrides from the user's repo if present
+          # Locate user's custom res/ directory (either extracted from .zip or committed directly)
           workspace = os.environ.get("GITHUB_WORKSPACE", "")
-          for candidate in [os.path.join(workspace, "app", "src", "main", "res"), os.path.join(workspace, "res")]:
-              if workspace and os.path.isdir(candidate):
-                  print(f"[INFO] Overlaying custom resources from {candidate} -> {res_dir}")
-                  shutil.copytree(candidate, res_dir, dirs_exist_ok=True)
+          search_roots = ["/tmp/user_skin"]
+          if workspace:
+              search_roots.append(workspace)
 
-          # Update strings.xml with Apple Music Immersed branding
-          tree = ET.parse(strings_path)
-          root = tree.getroot()
+          user_res_dir = None
+          for sroot in search_roots:
+              matches = glob.glob(os.path.join(sroot, "**", "res", "values", "strings.xml"), recursive=True)
+              if matches:
+                  user_res_dir = os.path.dirname(os.path.dirname(matches[0]))
+                  break
 
-          updates = {
-              "app_name": "Apple Music Immersed Skin",
-              "skin_sample": "Apple Music Immersed",
-              "skin_aaa": "Apple Music Immersed (Alt)",
-              "skin_author": "maximum-lie3625",
-              "skin_sample_description": "Cupertino-style full-bleed immersed blur skin for Poweramp v3",
-          }
+          if user_res_dir and os.path.isdir(user_res_dir):
+              print(f"[INFO] Found user custom res directory: {user_res_dir}")
 
-          existing = {elem.get("name"): elem for elem in root.findall("string")}
-          for key, val in updates.items():
-              if key in existing:
-                  existing[key].text = val
-              else:
-                  elem = ET.SubElement(root, "string", {"name": key})
-                  elem.text = val
+              # A. Copy custom drawables and xml/skins.xml
+              for sub in ["drawable", "xml"]:
+                  src_sub = os.path.join(user_res_dir, sub)
+                  if os.path.isdir(src_sub):
+                      shutil.copytree(src_sub, os.path.join(res_dir, sub), dirs_exist_ok=True)
 
-          tree.write(strings_path, encoding="utf-8", xml_declaration=True)
-          print("[INFO] Successfully updated strings.xml")
+              # B. Collect existing resource names in SDK sample values/ to prevent duplicate resource errors
+              existing_colors = set()
+              existing_attrs = set()
+              for val_xml in glob.glob(os.path.join(res_dir, "values", "*.xml")):
+                  try:
+                      t = ET.parse(val_xml)
+                      for c in t.getroot().findall("color"):
+                          existing_colors.add(c.get("name"))
+                      for a in t.getroot().findall("attr"):
+                          existing_attrs.add(a.get("name"))
+                  except Exception:
+                      pass
 
-          # Patch sample_skin_styles.xml if present to keep valid Poweramp v3 parent themes & stable IDs
-          styles_path = os.path.join(res_dir, "values", "sample_skin_styles.xml")
-          if os.path.exists(styles_path):
-              with open(styles_path, "r", encoding="utf-8") as f:
-                  styles_xml = f.read()
-              print(f"[INFO] Verified Poweramp skin styles at: {styles_path} ({len(styles_xml)} bytes)")
+              # C. Merge strings.xml (keep all SDK sample strings so Kotlin activities compile + add Apple Music strings)
+              base_tree = ET.parse(strings_path)
+              base_root = base_tree.getroot()
+              existing_strings = {el.get("name"): el for el in base_root.findall("string")}
 
-          # Ensure color accent resources exist for Apple Music Red (#FA2D48) and deep dark surfaces
-          colors_path = os.path.join(res_dir, "values", "apple_music_colors.xml")
-          colors_xml = """<?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <color name="apple_music_accent">#FA2D48</color>
-              <color name="apple_music_surface_dark">#0D0D11</color>
-              <color name="apple_music_glass_overlay">#66000000</color>
-          </resources>
+              user_strings_path = os.path.join(user_res_dir, "values", "strings.xml")
+              if os.path.exists(user_strings_path):
+                  user_tree = ET.parse(user_strings_path)
+                  for el in user_tree.getroot().findall("string"):
+                      name = el.get("name")
+                      if name in existing_strings:
+                          existing_strings[name].text = el.text
+                      else:
+                          base_root.append(el)
+                          existing_strings[name] = el
+
+              if "skin_name_dark" in existing_strings and "skin_sample" in existing_strings:
+                  existing_strings["skin_sample"].text = existing_strings["skin_name_dark"].text
+              base_tree.write(strings_path, encoding="utf-8", xml_declaration=True)
+              print("[INFO] Merged user strings.xml into SDK strings.xml")
+
+              # D. Merge colors.xml without duplicate definitions (e.g. no_drawable0000)
+              user_colors_path = os.path.join(user_res_dir, "values", "colors.xml")
+              if os.path.exists(user_colors_path):
+                  ct = ET.parse(user_colors_path)
+                  croot = ct.getroot()
+                  for c in list(croot.findall("color")):
+                      if c.get("name") in existing_colors:
+                          croot.remove(c)
+                  ct.write(os.path.join(res_dir, "values", "apple_music_colors.xml"), encoding="utf-8", xml_declaration=True)
+
+              # E. Merge attrs.xml without duplicate definitions
+              user_attrs_path = os.path.join(user_res_dir, "values", "attrs.xml")
+              if os.path.exists(user_attrs_path):
+                  at = ET.parse(user_attrs_path)
+                  aroot = at.getroot()
+                  for a in list(aroot.findall("attr")):
+                      if a.get("name") in existing_attrs:
+                          aroot.remove(a)
+                  at.write(os.path.join(res_dir, "values", "apple_music_attrs.xml"), encoding="utf-8", xml_declaration=True)
+
+              # F. Copy and sanitize apple_music_skin_styles.xml
+              user_styles_path = os.path.join(user_res_dir, "values", "apple_music_skin_styles.xml")
+              if os.path.exists(user_styles_path):
+                  with open(user_styles_path, "r", encoding="utf-8") as f:
+                      styles_content = f.read()
+
+                  # Fix malformed @style/com.maxmpz.audioplayer:TopWave reference
+                  styles_content = styles_content.replace(
+                      "@style/com.maxmpz.audioplayer:TopWave",
+                      "@com.maxmpz.audioplayer:style/TopWave"
+                  )
+
+                  # Inspect reference resources in /tmp/pa to verify valid Poweramp attrs & styles
+                  known_pa_attrs = set()
+                  known_pa_styles = set()
+                  for zpath in glob.glob("/tmp/pa/**/*.zip", recursive=True):
+                      try:
+                          with zipfile.ZipFile(zpath, "r") as zf:
+                              for zname in zf.namelist():
+                                  if zname.endswith(".xml"):
+                                      data = zf.read(zname).decode("utf-8", errors="ignore")
+                                      for m in re.finditer(r'<attr\s+name="([^"]+)"', data):
+                                          known_pa_attrs.add(m.group(1))
+                                      for m in re.finditer(r'<style\s+name="([^"]+)"', data):
+                                          known_pa_styles.add(m.group(1))
+                      except Exception:
+                          pass
+                  for xml_path in glob.glob("/tmp/pa/**/*.xml", recursive=True):
+                      try:
+                          with open(xml_path, "r", encoding="utf-8", errors="ignore") as xf:
+                              data = xf.read()
+                              for m in re.finditer(r'<attr\s+name="([^"]+)"', data):
+                                  known_pa_attrs.add(m.group(1))
+                              for m in re.finditer(r'<style\s+name="([^"]+)"', data):
+                                  known_pa_styles.add(m.group(1))
+                      except Exception:
+                          pass
+
+                  dst_styles_path = os.path.join(res_dir, "values", "apple_music_skin_styles.xml")
+                  with open(dst_styles_path, "w", encoding="utf-8") as f:
+                      f.write(styles_content)
+
+                  if known_pa_attrs and known_pa_styles:
+                      st_tree = ET.parse(dst_styles_path)
+                      st_root = st_tree.getroot()
+                      for style_el in st_root.findall("style"):
+                          parent = style_el.get("parent", "")
+                          if parent.startswith("com.maxmpz.audioplayer:style/"):
+                              st_name = parent.split("/", 1)[1]
+                              if st_name not in known_pa_styles:
+                                  print(f"[WARN] Fallback parent for unknown SDK style {parent}")
+                                  style_el.set("parent", "com.maxmpz.audioplayer:style/Base_ActivityTheme_Default")
+                          for item_el in list(style_el.findall("item")):
+                              iname = item_el.get("name", "")
+                              if iname.startswith("com.maxmpz.audioplayer:"):
+                                  aname = iname.split(":", 1)[1]
+                                  if aname not in known_pa_attrs:
+                                      print(f"[WARN] Removing unsupported SDK attr {iname} from {style_el.get('name')}")
+                                      style_el.remove(item_el)
+                      st_tree.write(dst_styles_path, encoding="utf-8", xml_declaration=True)
+
+          # G. Create missing @drawable/bg_immersed_dual_blur_fade referenced by AM_ItemTrackAAImage_Immersed
+          os.makedirs(os.path.join(res_dir, "drawable"), exist_ok=True)
+          fade_drawable = os.path.join(res_dir, "drawable", "bg_immersed_dual_blur_fade.xml")
+          if not os.path.exists(fade_drawable):
+              fade_xml = """<?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:gravity="top">
+                  <shape android:shape="rectangle">
+                      <size android:height="72dp" />
+                      <gradient
+                          android:angle="270"
+                          android:startColor="#99000000"
+                          android:centerColor="#33000000"
+                          android:endColor="#00000000" />
+                  </shape>
+              </item>
+              <item android:gravity="bottom">
+                  <shape android:shape="rectangle">
+                      <size android:height="96dp" />
+                      <gradient
+                          android:angle="90"
+                          android:startColor="#CC141419"
+                          android:centerColor="#66141419"
+                          android:endColor="#00000000" />
+                  </shape>
+              </item>
+          </layer-list>
           """
-          with open(colors_path, "w", encoding="utf-8") as f:
-              f.write(colors_xml.strip() + "\n")
-          print(f"[INFO] Wrote Apple Music color palette to {colors_path}")
+              with open(fade_drawable, "w", encoding="utf-8") as f:
+                  f.write(fade_xml.strip() + "\n")
+              print(f"[INFO] Created missing drawable: {fade_drawable}")
+
+          # H. Ensure SkinInfoActivity references still resolve ifSampleSkin is used
+          print("[INFO] Resource preparation complete.")
           EOF
 
-          # 4. Build the skin module from the root Gradle project (/tmp/pa)
+          # 5. Build the skin APK from the root Gradle project (/tmp/pa)
           cd /tmp/pa
           printf "\nsdk.dir=%s\n" "$ANDROID_HOME" >> local.properties
           chmod +x ./gradlew
           ./gradlew :poweramp_skin_sample:assembleDebug --no-daemon --stacktrace
 
-          # 5. Collect compiled APK into workspace output directory
+          # 6. Copy compiled APK to workspace output directory
           mkdir -p "$GITHUB_WORKSPACE/output"
-          find /tmp/pa/poweramp_skin_sample/build/outputs/apk -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/output/AppleMusic-Immersed-Skin-debug.apk" \;
+          find /tmp/pa/poweramp_skin_sample/build/outputs/apk -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/output/Cupertino-Apple-Music-Skin-debug.apk" \;
           ls -lh "$GITHUB_WORKSPACE/output/"
 
       - name: Upload Compiled APK
         uses: actions/upload-artifact@v4
         with:
-          name: AppleMusic-Immersed-Skin-APK
+          name: Cupertino-Apple-Music-Poweramp-Skin-APK
           path: output/*.apk
           retention-days: 14
