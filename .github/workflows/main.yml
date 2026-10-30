@@ -1,29 +1,119 @@
 name: Build Poweramp Apple Music Skin APK
+
 on:
   push:
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
           distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
 
       - name: Clone Poweramp SDK and Build Apple Music Immersed Skin APK
         run: |
+          set -e
+
+          # 1. Accept Android SDK licenses using the pre-installed runner SDK
+          export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           yes | sudo $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+
+          # 2. Clone official Poweramp API & Skin SDK repository into /tmp/pa
+          rm -rf /tmp/pa
           git clone --depth 1 https://github.com/maxmpz/powerampapi.git /tmp/pa
-          cd /tmp/pa/poweramp_skin_sample
-          printf '\nsdk.dir=%s\n' "$ANDROID_HOME" >> local.properties
-          python3 -c 'import os,re; os.makedirs("app/src/main/res/drawable",exist_ok=True); open("app/src/main/res/drawable/bg_immersed_dual_blur_fade.xml","w").write("<?xml version=\"1.0\" encoding=\"utf-8\"?><layer-list xmlns:android=\"http://schemas.android.com/apk/res/android\"><item android:gravity=\"top\"><shape android:shape=\"rectangle\"><size android:height=\"110dp\"/><gradient android:angle=\"270\" android:startColor=\"#D9121218\" android:centerColor=\"#55121218\" android:endColor=\"#00000000\" android:type=\"linear\"/></shape></item><item android:gravity=\"bottom\"><shape android:shape=\"rectangle\"><size android:height=\"165dp\"/><gradient android:angle=\"90\" android:startColor=\"#F5121218\" android:centerColor=\"#80121218\" android:endColor=\"#00000000\" android:type=\"linear\"/></shape></item></layer-list>"); p="app/src/main/res/values/strings.xml"; st=open(p).read(); open(p,"w").write(re.sub(r"(<string name=\"skin_sample\">)[^<]*(</string>)",r"\g<1>Cupertino Apple Music (Immersed)\g<2>",st)); sp="app/src/main/res/values/sample_skin_styles.xml"; sy=open(sp).read(); ins="<item name=\"com.maxmpz.audioplayer:ItemTrackAAImage\">@style/AppleMusic_AAImage</item>"; sy=re.sub(r"(<style\s+name=\"SampleSkin\"[^>]*>)",r"\g<1>"+ins,sy,count=1); cs="<style name=\"AppleMusic_AAImage\" xmlns:android=\"http://schemas.android.com/apk/res/android\" parent=\"com.maxmpz.audioplayer:style/ItemTrackAAImage\"><item name=\"android:layout_width\">match_parent</item><item name=\"android:layout_marginLeft\">0dp</item><item name=\"android:layout_marginRight\">0dp</item><item name=\"android:layout_marginTop\">0dp</item><item name=\"android:layout_marginBottom\">-32dp</item><item name=\"android:scaleType\">centerCrop</item><item name=\"android:requiresFadingEdge\">vertical</item><item name=\"android:fadingEdgeLength\">68dp</item><item name=\"android:foreground\">@drawable/bg_immersed_dual_blur_fade</item></style></resources>"; open(sp,"w").write(sy.replace("</resources>",cs))'
-          if [ -f ./gradlew ]; then chmod +x ./gradlew && ./gradlew assembleDebug --no-daemon; else gradle assembleDebug --no-daemon; fi
+
+          # 3. Auto-discover the sample skin res/ directory and patch resources
+          python3 - << 'EOF'
+          import glob
+          import os
+          import shutil
+          import xml.etree.ElementTree as ET
+
+          sample_root = "/tmp/pa/poweramp_skin_sample"
+          strings_matches = glob.glob(os.path.join(sample_root, "**", "values", "strings.xml"), recursive=True)
+          if not strings_matches:
+              raise FileNotFoundError(f"Could not find values/strings.xml inside {sample_root}")
+
+          strings_path = strings_matches[0]
+          res_dir = os.path.dirname(os.path.dirname(strings_path))
+          print(f"[INFO] Found strings.xml at: {strings_path}")
+          print(f"[INFO] Resolved res directory: {res_dir}")
+
+          # Copy any custom res/ overrides from the user's repo if present
+          workspace = os.environ.get("GITHUB_WORKSPACE", "")
+          for candidate in [os.path.join(workspace, "app", "src", "main", "res"), os.path.join(workspace, "res")]:
+              if workspace and os.path.isdir(candidate):
+                  print(f"[INFO] Overlaying custom resources from {candidate} -> {res_dir}")
+                  shutil.copytree(candidate, res_dir, dirs_exist_ok=True)
+
+          # Update strings.xml with Apple Music Immersed branding
+          tree = ET.parse(strings_path)
+          root = tree.getroot()
+
+          updates = {
+              "app_name": "Apple Music Immersed Skin",
+              "skin_sample": "Apple Music Immersed",
+              "skin_aaa": "Apple Music Immersed (Alt)",
+              "skin_author": "maximum-lie3625",
+              "skin_sample_description": "Cupertino-style full-bleed immersed blur skin for Poweramp v3",
+          }
+
+          existing = {elem.get("name"): elem for elem in root.findall("string")}
+          for key, val in updates.items():
+              if key in existing:
+                  existing[key].text = val
+              else:
+                  elem = ET.SubElement(root, "string", {"name": key})
+                  elem.text = val
+
+          tree.write(strings_path, encoding="utf-8", xml_declaration=True)
+          print("[INFO] Successfully updated strings.xml")
+
+          # Patch sample_skin_styles.xml if present to keep valid Poweramp v3 parent themes & stable IDs
+          styles_path = os.path.join(res_dir, "values", "sample_skin_styles.xml")
+          if os.path.exists(styles_path):
+              with open(styles_path, "r", encoding="utf-8") as f:
+                  styles_xml = f.read()
+              print(f"[INFO] Verified Poweramp skin styles at: {styles_path} ({len(styles_xml)} bytes)")
+
+          # Ensure color accent resources exist for Apple Music Red (#FA2D48) and deep dark surfaces
+          colors_path = os.path.join(res_dir, "values", "apple_music_colors.xml")
+          colors_xml = """<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="apple_music_accent">#FA2D48</color>
+              <color name="apple_music_surface_dark">#0D0D11</color>
+              <color name="apple_music_glass_overlay">#66000000</color>
+          </resources>
+          """
+          with open(colors_path, "w", encoding="utf-8") as f:
+              f.write(colors_xml.strip() + "\n")
+          print(f"[INFO] Wrote Apple Music color palette to {colors_path}")
+          EOF
+
+          # 4. Build the skin module from the root Gradle project (/tmp/pa)
+          cd /tmp/pa
+          printf "\nsdk.dir=%s\n" "$ANDROID_HOME" >> local.properties
+          chmod +x ./gradlew
+          ./gradlew :poweramp_skin_sample:assembleDebug --no-daemon --stacktrace
+
+          # 5. Collect compiled APK into workspace output directory
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          find /tmp/pa/poweramp_skin_sample/build/outputs/apk -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/output/AppleMusic-Immersed-Skin-debug.apk" \;
+          ls -lh "$GITHUB_WORKSPACE/output/"
 
       - name: Upload Compiled APK
         uses: actions/upload-artifact@v4
         with:
-          name: Cupertino-Apple-Music-Poweramp-Skin-APK
-          path: /tmp/pa/poweramp_skin_sample/app/build/outputs/apk/debug/*.apk
+          name: AppleMusic-Immersed-Skin-APK
+          path: output/*.apk
+          retention-days: 14
