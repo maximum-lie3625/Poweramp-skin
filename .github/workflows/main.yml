@@ -1,0 +1,67 @@
+name: Build Poweramp Apple Music Skin APK
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Clone Official Poweramp Skin SDK & Inject Apple Music Immersed Styles
+        run: |
+          git clone --depth 1 https://github.com/maxmpz/powerampapi.git /tmp/pa
+          cd /tmp/pa/poweramp_skin_sample
+
+          cat << 'EOF' > app/src/main/res/drawable/bg_immersed_dual_blur_fade.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:gravity="top">
+                  <shape android:shape="rectangle">
+                      <size android:height="110dp" />
+                      <gradient android:angle="270" android:startColor="#D9121218" android:centerColor="#55121218" android:endColor="#00000000" android:type="linear" />
+                  </shape>
+              </item>
+              <item android:gravity="bottom">
+                  <shape android:shape="rectangle">
+                      <size android:height="165dp" />
+                      <gradient android:angle="90" android:startColor="#F5121218" android:centerColor="#80121218" android:endColor="#00000000" android:type="linear" />
+                  </shape>
+              </item>
+          </layer-list>
+          EOF
+
+          cat << 'EOF' > app/src/main/res/values/apple_music_override.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources xmlns:android="http://schemas.android.com/apk/res/android">
+              <string name="skin_sample">Cupertino Apple Music (Immersed)</string>
+              <style name="AppleMusic_AAImage" parent="com.maxmpz.audioplayer:style/ItemTrackAAImage">
+                  <item name="android:layout_width">match_parent</item>
+                  <item name="android:layout_marginLeft">0dp</item>
+                  <item name="android:layout_marginRight">0dp</item>
+                  <item name="android:layout_marginTop">0dp</item>
+                  <item name="android:layout_marginBottom">-32dp</item>
+                  <item name="android:scaleType">centerCrop</item>
+                  <item name="android:requiresFadingEdge">vertical</item>
+                  <item name="android:fadingEdgeLength">68dp</item>
+                  <item name="android:foreground">@drawable/bg_immersed_dual_blur_fade</item>
+              </style>
+          </resources>
+          EOF
+
+          chmod +x gradlew || true
+          gradle assembleDebug
+
+      - name: Upload Compiled APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cupertino-Apple-Music-Poweramp-Skin-APK
+          path: /tmp/pa/poweramp_skin_sample/app/build/outputs/apk/debug/*.apk
