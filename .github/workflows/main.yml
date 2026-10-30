@@ -43,6 +43,9 @@ jobs:
           rm -rf /tmp/pa /tmp/pa_sample_backup
           git clone --depth 1 https://github.com/maxmpz/powerampapi.git /tmp/pa
           chmod +x /tmp/pa/gradlew
+
+          # Create /tmp/pa/local.properties (required by /tmp/pa/poweramp_skin_sample/build.gradle line 40)
+          printf "sdk.dir=%s\n" "$ANDROID_HOME" > /tmp/pa/local.properties
           cp -r /tmp/pa/poweramp_skin_sample /tmp/pa_sample_backup
 
           # 4. Patch resources and run self-healing Gradle build via Python
@@ -55,6 +58,14 @@ jobs:
           import sys
           import zipfile
           import xml.etree.ElementTree as ET
+
+          # Ensure local.properties exists in both root and subproject if needed
+          android_home = os.environ.get("ANDROID_HOME", "")
+          for lp_dir in ["/tmp/pa", "/tmp/pa/poweramp_skin_sample"]:
+              lp_path = os.path.join(lp_dir, "local.properties")
+              if not os.path.exists(lp_path):
+                  with open(lp_path, "w", encoding="utf-8") as f:
+                      f.write(f"sdk.dir={android_home}\n")
 
           sample_root = "/tmp/pa/poweramp_skin_sample"
           strings_matches = glob.glob(os.path.join(sample_root, "**", "values", "strings.xml"), recursive=True)
@@ -215,19 +226,16 @@ jobs:
                               elif "Theme" in sname or "Skin" in sname:
                                   style_el.set("parent", "com.maxmpz.audioplayer:style/Base_ActivityTheme_Default")
                               else:
-                                  # Remove invalid external parent so it compiles as a standalone style
                                   del style_el.attrib["parent"]
 
                       for item_el in list(style_el.findall("item")):
                           iname = item_el.get("name", "")
                           ival = (item_el.text or "").strip()
 
-                          # Remove invalid @style/com.maxmpz.audioplayer:... item values
                           if "com.maxmpz.audioplayer:" in ival:
                               style_el.remove(item_el)
                               continue
 
-                          # Remove unknown com.maxmpz.audioplayer:* attributes
                           if iname.startswith("com.maxmpz.audioplayer:"):
                               aname = iname.split(":", 1)[1]
                               if known_pa_attrs and aname not in known_pa_attrs:
@@ -237,7 +245,7 @@ jobs:
                   dst_styles_path = os.path.join(res_dir, "values", "apple_music_skin_styles.xml")
                   st_tree.write(dst_styles_path, encoding="utf-8", xml_declaration=True)
 
-              # Keep stable-ids.txt clean so aapt2 assigns conflict-free IDs for new styles/options
+              # Clear stable-ids.txt so aapt2 assigns fresh conflict-free IDs
               for sid in glob.glob(os.path.join(sample_root, "**", "stable-ids.txt"), recursive=True):
                   with open(sid, "w", encoding="utf-8") as f:
                       f.write("")
@@ -262,7 +270,7 @@ jobs:
               print("[WARN] Stage 1 build with custom skins.xml/styles failed. Inspecting errors...")
               print_gradle_errors(proc)
 
-              # Stage 2 Fallback: Restore clean SDK sample, keep SDK's native skins.xml & styles, and inject Apple Music branding & drawables
+              # Stage 2 Fallback: Restore clean SDK sample, keep local.properties, and inject Apple Music branding & drawables
               print("[INFO] Falling back to Stage 2: building on verified SDK sample structure...")
               shutil.rmtree(sample_root)
               shutil.copytree("/tmp/pa_sample_backup", sample_root)
