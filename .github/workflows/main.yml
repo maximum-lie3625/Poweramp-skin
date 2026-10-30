@@ -13,52 +13,14 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Clone Official Poweramp Skin SDK & Inject Apple Music Immersed Styles
+      - name: Clone Poweramp SDK and Build Apple Music Immersed Skin APK
         run: |
+          yes | sudo $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager --licenses >/dev/null 2>&1 || true
           git clone --depth 1 https://github.com/maxmpz/powerampapi.git /tmp/pa
           cd /tmp/pa/poweramp_skin_sample
-
-          cat << 'EOF' > app/src/main/res/drawable/bg_immersed_dual_blur_fade.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-              <item android:gravity="top">
-                  <shape android:shape="rectangle">
-                      <size android:height="110dp" />
-                      <gradient android:angle="270" android:startColor="#D9121218" android:centerColor="#55121218" android:endColor="#00000000" android:type="linear" />
-                  </shape>
-              </item>
-              <item android:gravity="bottom">
-                  <shape android:shape="rectangle">
-                      <size android:height="165dp" />
-                      <gradient android:angle="90" android:startColor="#F5121218" android:centerColor="#80121218" android:endColor="#00000000" android:type="linear" />
-                  </shape>
-              </item>
-          </layer-list>
-          EOF
-
-          cat << 'EOF' > app/src/main/res/values/apple_music_override.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources xmlns:android="http://schemas.android.com/apk/res/android">
-              <string name="skin_sample">Cupertino Apple Music (Immersed)</string>
-              <style name="AppleMusic_AAImage" parent="com.maxmpz.audioplayer:style/ItemTrackAAImage">
-                  <item name="android:layout_width">match_parent</item>
-                  <item name="android:layout_marginLeft">0dp</item>
-                  <item name="android:layout_marginRight">0dp</item>
-                  <item name="android:layout_marginTop">0dp</item>
-                  <item name="android:layout_marginBottom">-32dp</item>
-                  <item name="android:scaleType">centerCrop</item>
-                  <item name="android:requiresFadingEdge">vertical</item>
-                  <item name="android:fadingEdgeLength">68dp</item>
-                  <item name="android:foreground">@drawable/bg_immersed_dual_blur_fade</item>
-              </style>
-          </resources>
-          EOF
-
-          chmod +x gradlew || true
-          gradle assembleDebug
+          printf '\nsdk.dir=%s\n' "$ANDROID_HOME" >> local.properties
+          python3 -c 'import os,re; os.makedirs("app/src/main/res/drawable",exist_ok=True); open("app/src/main/res/drawable/bg_immersed_dual_blur_fade.xml","w").write("<?xml version=\"1.0\" encoding=\"utf-8\"?><layer-list xmlns:android=\"http://schemas.android.com/apk/res/android\"><item android:gravity=\"top\"><shape android:shape=\"rectangle\"><size android:height=\"110dp\"/><gradient android:angle=\"270\" android:startColor=\"#D9121218\" android:centerColor=\"#55121218\" android:endColor=\"#00000000\" android:type=\"linear\"/></shape></item><item android:gravity=\"bottom\"><shape android:shape=\"rectangle\"><size android:height=\"165dp\"/><gradient android:angle=\"90\" android:startColor=\"#F5121218\" android:centerColor=\"#80121218\" android:endColor=\"#00000000\" android:type=\"linear\"/></shape></item></layer-list>"); p="app/src/main/res/values/strings.xml"; st=open(p).read(); open(p,"w").write(re.sub(r"(<string name=\"skin_sample\">)[^<]*(</string>)",r"\g<1>Cupertino Apple Music (Immersed)\g<2>",st)); sp="app/src/main/res/values/sample_skin_styles.xml"; sy=open(sp).read(); ins="<item name=\"com.maxmpz.audioplayer:ItemTrackAAImage\">@style/AppleMusic_AAImage</item>"; sy=re.sub(r"(<style\s+name=\"SampleSkin\"[^>]*>)",r"\g<1>"+ins,sy,count=1); cs="<style name=\"AppleMusic_AAImage\" xmlns:android=\"http://schemas.android.com/apk/res/android\" parent=\"com.maxmpz.audioplayer:style/ItemTrackAAImage\"><item name=\"android:layout_width\">match_parent</item><item name=\"android:layout_marginLeft\">0dp</item><item name=\"android:layout_marginRight\">0dp</item><item name=\"android:layout_marginTop\">0dp</item><item name=\"android:layout_marginBottom\">-32dp</item><item name=\"android:scaleType\">centerCrop</item><item name=\"android:requiresFadingEdge\">vertical</item><item name=\"android:fadingEdgeLength\">68dp</item><item name=\"android:foreground\">@drawable/bg_immersed_dual_blur_fade</item></style></resources>"; open(sp,"w").write(sy.replace("</resources>",cs))'
+          if [ -f ./gradlew ]; then chmod +x ./gradlew && ./gradlew assembleDebug --no-daemon; else gradle assembleDebug --no-daemon; fi
 
       - name: Upload Compiled APK
         uses: actions/upload-artifact@v4
